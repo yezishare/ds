@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能商品展示系统</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vant@3/lib/index.css">
+    <style>
+        .product-item {
+            margin: 10px;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .product-image {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+        }
+        .product-title {
+            padding: 12px;
+            font-size: 14px;
+            line-height: 1.4;
+            color: #333;
+        }
+        .product-recommendations {
+            margin: 10px;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+            color: white;
+        }
+        .recommendation-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .loading-container {
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <van-nav-bar title="商品展示" fixed placeholder />
+        
+        <van-pull-refresh v-model="refreshing" @refresh="onRefresh">
+            <van-list
+                v-model:loading="loading"
+                :finished="finished"
+                finished-text="没有更多商品了"
+                @load="onLoad"
+            >
+                <!-- 推荐商品 -->
+                <div v-if="recommendations.length > 0" class="product-recommendations">
+                    <div class="recommendation-title">🎯 为您推荐</div>
+                    <div v-for="product in recommendations" :key="'rec-' + product.id" class="product-item">
+                        <van-swipe :autoplay="3000" indicator-color="white">
+                            <van-swipe-item 
+                                v-for="image in product.main_images" 
+                                :key="image.id"
+                                @click="showProductMedia(product)"
+                            >
+                                <img :src="image.url" class="product-image" />
+                            </van-swipe-item>
+                        </van-swipe>
+                        <div class="product-title">{{ product.title }}</div>
+                    </div>
+                </div>
+
+                <!-- 商品列表 -->
+                <div v-for="product in products" :key="product.id" class="product-item">
+                    <van-swipe :autoplay="3000" indicator-color="white">
+                        <van-swipe-item 
+                            v-for="image in product.main_images" 
+                            :key="image.id"
+                            @click="showProductMedia(product)"
+                        >
+                            <img :src="image.url" class="product-image" />
+                        </van-swipe-item>
+                    </van-swipe>
+                    <div class="product-title" @click="viewProductDetail(product)">
+                        {{ product.title }}
+                    </div>
+                </div>
+
+                <!-- 加载状态 -->
+                <div v-if="loading" class="loading-container">
+                    <van-loading type="spinner" size="24px">加载中...</van-loading>
+                </div>
+            </van-list>
+        </van-pull-refresh>
+
+        <!-- 媒体展示弹窗 -->
+        <van-popup v-model="showMediaPopup" position="bottom" round :style="{ height: '100%' }">
+            <div style="height: 100%; background: black;">
+                <div v-if="currentProduct">
+                    <!-- 视频播放 -->
+                    <div v-if="currentProduct.videos.length > 0 && !showDetailImages" style="height: 100%; display: flex; flex-direction: column;">
+                        <video 
+                            ref="videoPlayer"
+                            :src="currentProduct.videos[0].url"
+                            controls
+                            style="width: 100%; height: 300px; background: #000;"
+                            @play="onVideoPlay"
+                            @ended="switchToDetailImages"
+                        ></video>
+                        <div style="padding: 20px; color: white;">
+                            <h3>{{ currentProduct.title }}</h3>
+                            <van-button type="primary" @click="switchToDetailImages" style="margin-top: 10px;">
+                                查看商品详情
+                            </van-button>
+                        </div>
+                    </div>
+                    
+                    <!-- 详情图片 -->
+                    <div v-if="showDetailImages || currentProduct.videos.length === 0" style="height: 100%;">
+                        <van-swipe 
+                            indicator-color="white"
+                            @change="onDetailImageChange"
+                        >
+                            <van-swipe-item v-for="image in currentProduct.detail_images" :key="image.id">
+                                <img :src="image.url" style="width: 100%; height: 100%; object-fit: contain;" />
+                            </van-swipe-item>
+                        </van-swipe>
+                    </div>
+                </div>
+                
+                <van-button 
+                    round
+                    style="position: absolute; top: 20px; right: 20px; background: rgba(0,0,0,0.5); color: white; border: none;"
+                    @click="closeMedia"
+                >
+                    ✕
+                </van-button>
+            </div>
+        </van-popup>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vant@3/lib/vant.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    
+    <!-- 行为跟踪SDK -->
+    <script src="/static/js/behavior-tracker.js"></script>
+    
+    <script>
+        const { createApp, ref, onMounted, onUnmounted } = Vue;
+        
+        createApp({
+            setup() {
+                const products = ref([]);
+                const recommendations = ref([]);
+                const loading = ref(false);
+                const finished = ref(false);
+                const refreshing = ref(false);
+                const currentPage = ref(1);
+                const showMediaPopup = ref(false);
+                const currentProduct = ref(null);
+                const showDetailImages = ref(false);
+                const videoPlayer = ref(null);
+                
+                // 加载商品列表
+                const loadProducts = async (page = 1, isRefresh = false) => {
+                    try {
+                        loading.value = true;
+                        const response = await axios.get(`/api/products?page=${page}`);
+                        const data = response.data;
+                        
+                        if (isRefresh) {
+                            products.value = data.products;
+                        } else {
+                            products.value.push(...data.products);
+                        }
+                        
+                        // 如果是第一页，加载推荐
+                        if (page === 1) {
+                            loadRecommendations();
+                        }
+                        
+                        finished.value = page >= data.pages;
+                        currentPage.value = page;
+                    } catch (error) {
+                        console.error('加载商品失败:', error);
+                        finished.value = true;
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+                
+                // 加载推荐商品
+                const loadRecommendations = async () => {
+                    try {
+                        const response = await axios.get('/api/products/recommendations');
+                        recommendations.value = response.data.recommendations || [];
+                    } catch (error) {
+                        console.error('加载推荐失败:', error);
+                    }
+                };
+                
+                // 显示商品媒体
+                const showProductMedia = (product) => {
+                    // 跟踪图片点击事件
+                    window.behaviorTracker.track('image_click', product.id, {
+                        action: 'open_media_viewer'
+                    });
+                    
+                    currentProduct.value = product;
+                    showDetailImages.value = product.videos.length === 0;
+                    showMediaPopup.value = true;
+                };
+                
+                // 查看商品详情
+                const viewProductDetail = (product) => {
+                    window.behaviorTracker.track('title_click', product.id, {
+                        action: 'view_product_detail'
+                    });
+                    window.location.href = `/product/${product.id}`;
+                };
+                
+                // 视频播放事件
+                const onVideoPlay = () => {
+                    if (currentProduct.value) {
+                        window.behaviorTracker.track('video_play', currentProduct.value.id, {
+                            video_id: currentProduct.value.videos[0]?.id
+                        });
+                    }
+                };
+                
+                // 切换到详情图片
+                const switchToDetailImages = () => {
+                    showDetailImages.value = true;
+                    if (currentProduct.value) {
+                        window.behaviorTracker.track('media_switch', currentProduct.value.id, {
+                            from: 'video',
+                            to: 'images'
+                        });
+                    }
+                };
+                
+                // 详情图片切换事件
+                const onDetailImageChange = (index) => {
+                    if (currentProduct.value) {
+                        window.behaviorTracker.track('detail_image_view', currentProduct.value.id, {
+                            image_index: index
+                        });
+                    }
+                };
+                
+                // 关闭媒体查看器
+                const closeMedia = () => {
+                    showMediaPopup.value = false;
+                    currentProduct.value = null;
+                    showDetailImages.value = false;
+                    
+                    // 暂停视频播放
+                    if (videoPlayer.value) {
+                        videoPlayer.value.pause();
+                    }
+                };
+                
+                // 列表加载更多
+                const onLoad = () => {
+                    if (refreshing.value) {
+                        products.value = [];
+                        refreshing.value = false;
+                    }
+                    loadProducts(currentPage.value + 1);
+                };
+                
+                // 下拉刷新
+                const onRefresh = () => {
+                    finished.value = false;
+                    loading.value = true;
+                    loadProducts(1, true).then(() => {
+                        refreshing.value = false;
+                    });
+                };
+                
+                onMounted(() => {
+                    loadProducts(1, true);
+                });
+                
+                onUnmounted(() => {
+                    // 清理资源
+                    if (videoPlayer.value) {
+                        videoPlayer.value.pause();
+                    }
+                });
+                
+                return {
+                    products,
+                    recommendations,
+                    loading,
+                    finished,
+                    refreshing,
+                    showMediaPopup,
+                    currentProduct,
+                    showDetailImages,
+                    videoPlayer,
+                    onLoad,
+                    onRefresh,
+                    showProductMedia,
+                    viewProductDetail,
+                    onVideoPlay,
+                    switchToDetailImages,
+                    onDetailImageChange,
+                    closeMedia
+                };
+            }
+        }).use(vant).mount('#app');
+    </script>
+</body>
+</html>
